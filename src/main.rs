@@ -68,9 +68,9 @@ fn main() {
                 conn_map.get_mut(&key.wrapped()).unwrap()
             } else if conn_map.contains_key(&key) {
                 conn_map.get_mut(&key).unwrap()
-            } else if let Some(conn) = Connection::start(&ipheader, &tcpheader, PackageCodec) {
+            } else if let Some(conn) = Connection::start(&ipheader, &tcpheader) {
                 match conn_map.entry(key) {
-                    Entry::Vacant(ve) => Some(ve.insert(conn)),
+                    Entry::Vacant(ve) => Some(ve.insert(conn.decoded(PackageCodec, PackageCodec))),
                     _ => unreachable!(),
                 };
                 println!("now tracking {} connections", conn_map.len());

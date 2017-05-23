@@ -386,7 +386,7 @@ pub mod tcp {
     use std::num::Wrapping;
     use tokio_io::codec::Decoder;
     use bytes::BytesMut;
-
+    use bytes::BufMut;
     use pcap::IpHeader;
     use pcap::TcpHeader;
 
@@ -413,15 +413,9 @@ pub mod tcp {
     }
 
     #[derive(Debug)]
-    pub struct Connection<D> {
+    pub struct Connection {
         key: ConnectionId,
         state: TcpState,
-        decoder: D,
-        client_buffer: BytesMut,
-        server_buffer: BytesMut,
-        client_readable: bool,
-        server_readable: bool,
-        decodes: usize,
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -438,29 +432,27 @@ pub mod tcp {
         ServerClient,
     }
 
-    impl<D: Decoder> Connection<D> {
-        pub fn start(ip: &IpHeader, tcp: &TcpHeader, decoder: D) -> Option<Self> {
+    impl Connection {
+        pub fn start(ip: &IpHeader, tcp: &TcpHeader) -> Option<Self> {
             if tcp.is_syn() && !tcp.is_ack() {
                 assert_eq!(tcp.acknowledgement_number, 0);
                 println!("C: SYN seq={} ack={}", tcp.sequence_number, tcp.acknowledgement_number);
                 Some(Connection {
                     key: ConnectionId::new(ip, tcp),
                     state: TcpState::Syn(tcp.sequence_number, tcp.acknowledgement_number),
-                    decoder,
-                    client_buffer: BytesMut::with_capacity(16 * 1024),
-                    server_buffer: BytesMut::with_capacity(16 * 1024),
-                    client_readable: false,
-                    server_readable: false,
-                    decodes: 0,
                 })
             } else {
                 None
             }
         }
 
-        pub fn advance(&mut self, ip: &IpHeader, tcp: &TcpHeader, data: &[u8]) {
+        pub fn decoded<D: Decoder>(self, client_decoder: D, server_decoder: D) -> DecodedConnection<D> {
+            DecodedConnection::new(self, client_decoder, server_decoder)
+        }
+
+        /// Returns Some(direction) if the data constains new data in direction.
+        pub fn advance(&mut self, ip: &IpHeader, tcp: &TcpHeader, data: &[u8]) -> Option<Direction> {
             use std::cmp;
-            use bytes::BufMut;
             use self::Direction::*;
             let dir = if self.key == ConnectionId::new(ip, tcp) { ClientServer } else { ServerClient };
             let data_len = Wrapping(data.len() as u32);
@@ -483,7 +475,7 @@ pub mod tcp {
                     //println!("C: EST ACK seq={} ack={} len={}", tcp.sequence_number, tcp.acknowledgement_number, data.len());
                     if cs > tcp.sequence_number {
                         // retransmission, ignore data
-                        return;
+                        return None;
                     }
                     assert_eq!(cs, tcp.sequence_number, "seq mismatch, diff = {}", cmp::max(cs, tcp.sequence_number) - cmp::min(cs, tcp.sequence_number));
                     assert!(ss >= tcp.acknowledgement_number);
@@ -494,7 +486,7 @@ pub mod tcp {
                     //println!("S: EST ACK seq={} ack={} len={}", tcp.sequence_number, tcp.acknowledgement_number, data.len());
                     if ss > tcp.sequence_number {
                         // retransmission
-                        return;
+                        return None;
                     }
 
                     assert_eq!(ss, tcp.sequence_number);
@@ -507,52 +499,7 @@ pub mod tcp {
                 }
             };
 
-            if data.is_empty() {
-                return;
-            }
-
-            let ref mut buf = match dir {
-                ClientServer => {
-                    self.client_readable = true;
-                    &mut self.client_buffer
-                },
-                ServerClient => {
-                    self.server_readable = true;
-                    &mut self.server_buffer
-                }
-            };
-
-            buf.reserve(data.len());
-            buf.put(data);
-
-            // TODO: eof handling when closing
-        }
-
-        pub fn decode(&mut self) -> Result<Option<(Direction, D::Item)>, D::Error> {
-            self.decodes += 1;
-            if self.client_readable {
-                /*println!("{} Decoding from Client -> Server:", self.decodes);
-                if self.decodes == 588 {
-                    println!("Decoding from Client -> Server:\n{:?}", Hexdump { bytes: &self.client_buffer[..] });
-                }*/
-                match self.decoder.decode(&mut self.client_buffer) {
-                    Ok(None) => {},
-                    Ok(Some(x)) => return Ok(Some((Direction::ClientServer, x))),
-                    Err(e) => return Err(e),
-                }
-                self.client_readable = false;
-            }
-
-            if self.server_readable {
-                match self.decoder.decode(&mut self.server_buffer) {
-                    Ok(None) => {},
-                    Ok(Some(x)) => return Ok(Some((Direction::ServerClient, x))),
-                    Err(e) => return Err(e),
-                }
-                self.server_readable = false;
-            }
-
-            Ok(None)
+            Some(dir)
         }
 
         pub fn is_done(&self) -> bool {
@@ -561,6 +508,95 @@ pub mod tcp {
 
         pub fn key(&self) -> ConnectionId {
             self.key
+        }
+    }
+
+    pub struct DecodedConnection<D> {
+        inner: Connection,
+        client_side: ConnectionData<D>,
+        server_side: ConnectionData<D>,
+    }
+
+    impl<D: Decoder> DecodedConnection<D> {
+        fn new(connection: Connection, client_decoder: D, server_decoder: D) -> Self {
+            DecodedConnection {
+                inner: connection,
+                client_side: ConnectionData::new(Direction::ClientServer, client_decoder),
+                server_side: ConnectionData::new(Direction::ServerClient, server_decoder),
+            }
+        }
+
+        pub fn advance(&mut self, ip: &IpHeader, tcp: &TcpHeader, data: &[u8]) {
+            match self.inner.advance(ip, tcp, data) {
+                Some(Direction::ClientServer) => self.client_side.push(data),
+                Some(Direction::ServerClient) => self.server_side.push(data),
+                None => {},
+            }
+            // TODO: eof handling when closing
+        }
+
+        pub fn is_done(&self) -> bool {
+            self.inner.is_done()
+        }
+
+        pub fn key(&self) -> ConnectionId {
+            self.inner.key()
+        }
+
+        pub fn decode(&mut self) -> Result<Option<(Direction, D::Item)>, D::Error> {
+            if self.client_side.is_decodable() {
+                if let Some(x) = self.client_side.decode()? {
+                    return Ok(Some(x));
+                }
+            }
+
+            if self.server_side.is_decodable() {
+                if let Some(x) = self.server_side.decode()? {
+                    return Ok(Some(x));
+                }
+            }
+
+            Ok(None)
+        }
+    }
+
+    struct ConnectionData<D> {
+        direction: Direction,
+        decodable: bool,
+        decoder: D,
+        buffer: BytesMut,
+    }
+
+    impl<D: Decoder> ConnectionData<D> {
+        fn new(direction: Direction, decoder: D) -> Self {
+            ConnectionData {
+                direction,
+                decodable: false,
+                decoder,
+                buffer: BytesMut::with_capacity(65536),
+            }
+        }
+
+        fn push(&mut self, data: &[u8]) {
+            self.buffer.reserve(data.len());
+            self.buffer.put(data);
+            self.decodable = true;
+        }
+
+        fn is_decodable(&self) -> bool {
+            self.decodable
+        }
+
+        fn decode(&mut self) -> Result<Option<(Direction, D::Item)>, D::Error> {
+            assert!(self.decodable);
+            match self.decoder.decode(&mut self.buffer) {
+                Ok(None) => {
+                    self.decodable = false;
+                    Ok(None)
+                },
+                Ok(Some(x)) => Ok(Some((self.direction, x))),
+                Err(e) => Err(e),
+            }
         }
     }
 
