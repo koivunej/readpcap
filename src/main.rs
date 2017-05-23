@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
 use readpcap::pcap;
-use readpcap::pcap::IpProto;
+use readpcap::ip::IpProto;
+use readpcap::ip::parse_ip_header;
 use readpcap::tcp::ConnectionId;
 use readpcap::tcp::Connection;
 use readpcap::tcp::Direction::*;
@@ -50,7 +51,7 @@ fn main() {
         let frame = header.parse_frame(&buf);
         //println!("{:?}", frame);
         // there could be frame.parse_header()
-        let (ipheader, next) = readpcap::pcap::parse_ip_header(frame.body()).unwrap();
+        let (ipheader, next) = parse_ip_header(frame.body()).unwrap();
         //println!("{:?}", ipheader);
 
         if ipheader.protocol != IpProto::Tcp {

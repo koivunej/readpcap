@@ -210,6 +210,21 @@ pub mod pcap {
             x => DataLink::Unknown(x),
         })
     }
+}
+
+pub mod ip {
+    use std::fmt;
+    use std::io;
+    use std::io::Read;
+    use std::time::Duration;
+    use byteorder::ReadBytesExt;
+    use byteorder::LittleEndian;
+    use byteorder::BigEndian;
+    use byteorder::NetworkEndian;
+    use byteorder::ByteOrder;
+
+    use tcp::TcpHeader;
+    use tcp::parse_tcp_header;
 
     pub fn parse_ip_header<'a>(buf: &'a [u8]) -> io::Result<(IpHeader, &'a [u8])> {
         let mut cursor = io::Cursor::new(buf);
@@ -276,7 +291,7 @@ pub mod pcap {
     impl IpHeader {
         pub fn parse_headers<'a>(&self, buf: &'a [u8]) -> io::Result<(IpProtoHeaders, &'a [u8])> {
             match &self.protocol {
-                &IpProto::Tcp => parse_tcp_headers(buf),
+                &IpProto::Tcp => parse_tcp_header(buf).map(|(h, data)| (IpProtoHeaders::Tcp(h), data)),
                 _ => unimplemented!(),
             }
         }
@@ -305,6 +320,24 @@ pub mod pcap {
             }
         }
     }
+}
+
+pub mod tcp {
+    use std::fmt;
+    use std::io;
+    use std::io::Read;
+    use std::time::Duration;
+    use byteorder::ReadBytesExt;
+    use byteorder::LittleEndian;
+    use byteorder::BigEndian;
+    use byteorder::NetworkEndian;
+    use byteorder::ByteOrder;
+    use std::net::SocketAddr;
+    use std::num::Wrapping;
+    use tokio_io::codec::Decoder;
+    use bytes::BytesMut;
+    use bytes::BufMut;
+    use ip::IpHeader;
 
     #[derive(Debug)]
     pub struct TcpHeader {
@@ -339,7 +372,7 @@ pub mod pcap {
         }
     }
 
-    fn parse_tcp_headers<'a>(buf: &'a [u8]) -> io::Result<(IpProtoHeaders, &'a [u8])> {
+    pub fn parse_tcp_header<'a>(buf: &'a [u8]) -> io::Result<(TcpHeader, &'a [u8])> {
         let mut cursor = io::Cursor::new(buf);
 
         let src_port = cursor.read_u16::<NetworkEndian>()?;
@@ -365,7 +398,7 @@ pub mod pcap {
         let pos = cursor.position() as usize;
         assert_eq!(pos, len);
 
-        Ok((IpProtoHeaders::Tcp(TcpHeader {
+        Ok((TcpHeader {
             src_port,
             dst_port,
             sequence_number,
@@ -377,18 +410,8 @@ pub mod pcap {
             checksum,
             urgent_pointer,
             // options
-        }), &buf[pos..]))
+        }, &buf[pos..]))
     }
-}
-
-pub mod tcp {
-    use std::net::SocketAddr;
-    use std::num::Wrapping;
-    use tokio_io::codec::Decoder;
-    use bytes::BytesMut;
-    use bytes::BufMut;
-    use pcap::IpHeader;
-    use pcap::TcpHeader;
 
     #[derive(Debug, Clone, Copy, PartialEq, Hash, Eq)]
     pub struct ConnectionId {
@@ -599,8 +622,6 @@ pub mod tcp {
             }
         }
     }
-
-    use std::fmt;
 
     struct Hexdump<'x> {
         bytes: &'x [u8],
