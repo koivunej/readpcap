@@ -2,7 +2,6 @@ extern crate readpcap;
 extern crate eventstore_tcp;
 
 use std::env;
-use std::io;
 use std::fs;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -23,7 +22,7 @@ fn main() {
 
     let mut file = fs::File::open(filename).expect("Failed to open INPUT file");
 
-    let header = readpcap::pcap::read_header(&mut file).unwrap();
+    let header = pcap::read_header(&mut file).unwrap();
 
     println!("Header: {:?}", header);
 
@@ -34,7 +33,7 @@ fn main() {
 
     let mut first_offset = None;
 
-    for i in 0.. {
+    for _ in 0.. {
         //println!("processing frame {}", i);
         buf.clear();
 

@@ -5,7 +5,6 @@ extern crate tokio_io;
 pub mod pcap {
     use std::fmt;
     use std::io;
-    use std::io::Read;
     use std::time::Duration;
     use byteorder::ReadBytesExt;
     use byteorder::LittleEndian;
@@ -73,14 +72,6 @@ pub mod pcap {
                 .field("dst", &self.destination)
                 .field("len", &self.len)
                 .finish()
-        }
-    }
-
-    struct Hexadecimal<T: fmt::LowerHex>(T);
-
-    impl<T: fmt::LowerHex> fmt::Debug for Hexadecimal<T> {
-        fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-            write!(fmt, "{:x}", self.0)
         }
     }
 
@@ -213,15 +204,9 @@ pub mod pcap {
 }
 
 pub mod ip {
-    use std::fmt;
     use std::io;
-    use std::io::Read;
-    use std::time::Duration;
     use byteorder::ReadBytesExt;
-    use byteorder::LittleEndian;
-    use byteorder::BigEndian;
     use byteorder::NetworkEndian;
-    use byteorder::ByteOrder;
 
     use tcp::TcpHeader;
     use tcp::parse_tcp_header;
@@ -230,14 +215,14 @@ pub mod ip {
         let mut cursor = io::Cursor::new(buf);
 
         let (version, header_len) = {
-            let byte = cursor.read_u8();
-            (buf[0] >> 4, buf[0] & 0xf)
+            let byte = cursor.read_u8()?;
+            (byte >> 4, byte & 0xf)
         };
 
         assert_eq!(version, 4);
         assert_eq!(header_len * 4, 20);
 
-        let tos = cursor.read_u8();
+        let tos = cursor.read_u8()?;
         let total_len = cursor.read_u16::<NetworkEndian>()?;
 
         assert_eq!(total_len as usize, buf.len());
@@ -245,7 +230,7 @@ pub mod ip {
         let id = cursor.read_u16::<NetworkEndian>()?;
         let (flags, fragment_offset) = {
             let short = cursor.read_u16::<NetworkEndian>()?;
-            (short >> 13, short & 0x1fff)
+            ((short >> 13) as u8, short & 0x1fff)
         };
 
         let ttl = cursor.read_u8()?;
@@ -257,7 +242,13 @@ pub mod ip {
         Ok((IpHeader {
             version: IpVersion::Four,
             protocol: IpProto::from(protocol),
+            tos,
+            len: total_len,
+            id,
+            flags,
+            fragment_offset,
             ttl,
+            checksum,
             source: Ipv4Addr::from(src).into(),
             destination: Ipv4Addr::from(dst).into(),
         }, &buf[header_len as usize * 4..]))
@@ -276,7 +267,13 @@ pub mod ip {
     pub struct IpHeader {
         pub version: IpVersion,
         pub protocol: IpProto,
+        pub tos: u8,
+        pub len: u16,
+        pub id: u16,
+        pub flags: u8,
+        pub fragment_offset: u16,
         pub ttl: u8,
+        pub checksum: u16,
         pub source: IpAddr,
         pub destination: IpAddr,
     }
@@ -316,7 +313,7 @@ pub mod ip {
         pub fn into_tcp_header(self) -> Result<TcpHeader, IpProtoHeaders> {
             match self {
                 IpProtoHeaders::Tcp(x) => Ok(x),
-                y => Err(y)
+                // y => Err(y)
             }
         }
     }
@@ -325,13 +322,8 @@ pub mod ip {
 pub mod tcp {
     use std::fmt;
     use std::io;
-    use std::io::Read;
-    use std::time::Duration;
     use byteorder::ReadBytesExt;
-    use byteorder::LittleEndian;
-    use byteorder::BigEndian;
     use byteorder::NetworkEndian;
-    use byteorder::ByteOrder;
     use std::net::SocketAddr;
     use std::num::Wrapping;
     use tokio_io::codec::Decoder;
@@ -392,7 +384,7 @@ pub mod tcp {
 
         if len > 20 {
             // options
-            for i in 0..(len - 20) { cursor.read_u8()?; }
+            for _ in 0..(len - 20) { cursor.read_u8()?; }
         }
 
         let pos = cursor.position() as usize;
@@ -488,7 +480,7 @@ pub mod tcp {
                                      (Wrapping(tcp.sequence_number) + Wrapping(1)).0,
                                      (Wrapping(tcp.acknowledgement_number) + Wrapping(1)).0)
                 },
-                (TcpState::SynAck(cs, ca, ss, sa), ClientServer, false, true, false, false) => {
+                (TcpState::SynAck(cs, _, ss, sa), ClientServer, false, true, false, false) => {
                     //println!("C: ACK seq={} ack={}", tcp.sequence_number, tcp.acknowledgement_number);
                     assert_eq!((Wrapping(cs) + Wrapping(1)).0, tcp.sequence_number);
                     assert_eq!(ss, tcp.acknowledgement_number);
@@ -505,7 +497,7 @@ pub mod tcp {
                     assert!(ca <= ss, "ack does not match expected, diff = {}", if ca > ss { ca - ss } else { ss - ca });
                     TcpState::Established((Wrapping(cs) + data_len).0, tcp.acknowledgement_number, ss, sa)
                 }
-                (TcpState::Established(cs, ca, ss, sa), ServerClient, false, true, false, false) => {
+                (TcpState::Established(cs, ca, ss, _), ServerClient, false, true, false, false) => {
                     //println!("S: EST ACK seq={} ack={} len={}", tcp.sequence_number, tcp.acknowledgement_number, data.len());
                     if ss > tcp.sequence_number {
                         // retransmission
