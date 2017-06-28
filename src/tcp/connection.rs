@@ -41,7 +41,8 @@ enum TcpState {
     Syn(u32, u32),
     SynAck(u32, u32, u32, u32),
     Established(u32, u32, u32, u32),
-    // TODO: closing
+    ClientClosed(u32, u32),
+    BothClosed(bool), // seen last ack
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -111,6 +112,20 @@ impl Connection {
                 //assert_eq!(cs, tcp.acknowledgement_number, "ack does not match expected, diff = {}", if cs > tcp.acknowledgement_number { cs - tcp.acknowledgement_number } else { tcp.acknowledgement_number - cs });
                 assert!(tcp.acknowledgement_number <= cs, "ack does not match expected, diff = {}", if ca > ss { ca - ss } else { ss - ca });
                 TcpState::Established(cs, ca, (Wrapping(ss) + data_len).0, tcp.acknowledgement_number)
+            },
+            (TcpState::Established(cs, ca, ss, sa), ClientServer, false, true, true, false) => {
+                assert_eq!(cs, tcp.sequence_number);
+                assert!(ss >= tcp.acknowledgement_number);
+                assert!(ca <= ss);
+                // client initiated shutdown
+                TcpState::ClientClosed(ss, sa)
+            },
+            (TcpState::ClientClosed(_, _), ServerClient, false, true, true, false) => {
+                TcpState::BothClosed(false)
+            },
+            (TcpState::BothClosed(false), ClientServer, false, true, false, false) => {
+                // last ack has been seen
+                TcpState::BothClosed(true)
             }
             (st, dir, syn, ack, fin, rst) => {
                 panic!("unsupported transition with {} bytes, st = {:?}, dir = {:?}, syn = {}, ack = {}, fin = {}, rst = {}", data.len(), st, dir, syn, ack, fin, rst);
@@ -121,7 +136,10 @@ impl Connection {
     }
 
     pub fn is_done(&self) -> bool {
-        false
+        match self.state {
+            TcpState::BothClosed(true) => true,
+            _ => false,
+        }
     }
 
     pub fn key(&self) -> ConnectionId {
