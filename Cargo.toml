@@ -3,8 +3,16 @@ name = "readpcap"
 version = "0.1.0"
 authors = ["Joonas Koivunen <joonas.koivunen@gmail.com>"]
 
+[lib]
+
 [dependencies]
 byteorder = "1"
-eventstore-tcp = { git = "https://github.com/koivunej/eventstore-tcp.git" }
 tokio-io = "*"
 bytes = "*"
+
+[[example]]
+name = "read-eventstore_tcp-pcap"
+path = "examples/read-eventstore_tcp-pcap.rs"
+
+[dev-dependencies]
+eventstore-tcp = { git = "https://github.com/koivunej/eventstore-tcp.git" }
