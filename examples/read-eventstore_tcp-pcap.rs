@@ -37,7 +37,7 @@ fn main() {
 }
 
 // this outer function handles the eventstore-tcp specific matters, using the
-// `iterate_decoded_tcp_frames` "helper" to actually go through all of the connections
+// `for_each_decoded_frame` "helper" to actually go through all of the connections
 fn print_operation_durations(file: &mut fs::File) -> io::Result<()> {
 
     // when protocol level operation started
@@ -49,7 +49,7 @@ fn print_operation_durations(file: &mut fs::File) -> io::Result<()> {
         (PackageCodec, PackageCodec)
     }
 
-    let conn_map = iterate_decoded_tcp_frames(file, decoder_factory, |dir, elapsed, frame| {
+    let connections = for_each_decoded_frame(file, decoder_factory, |dir, elapsed, frame| {
         match (dir, frame) {
             (ClientServer, Package { correlation_id, .. }) => {
                 assert_eq!(operations.insert(correlation_id, elapsed), None);
@@ -64,9 +64,9 @@ fn print_operation_durations(file: &mut fs::File) -> io::Result<()> {
         }
     })?;
 
-    if !conn_map.is_empty() {
-        eprintln!("Packet capture ended before with {} remaining connections:", conn_map.len());
-        for (key, _) in conn_map {
+    if !connections.is_empty() {
+        eprintln!("Packet capture ended with {} remaining connections:", connections.len());
+        for (key, _) in connections {
             eprintln!("  => {:?}", key);
         }
     }
@@ -79,7 +79,9 @@ fn print_operation_durations(file: &mut fs::File) -> io::Result<()> {
 // Haven't yet written any iterator alike api for scanning the file but to illustrate the use of
 // the library this function handles all readpcap specific parts and the calling function handles
 // the protocol specific parts with the callback.
-fn iterate_decoded_tcp_frames<DF, D, F>(
+//
+// This function could be called `boilerplate` as well.
+fn for_each_decoded_frame<DF, D, F>(
         file: &mut fs::File,
         decoder_factory: DF,
         mut callback: F) -> io::Result<HashMap<ConnectionId, DecodedConnection<D>>>
@@ -91,7 +93,7 @@ fn iterate_decoded_tcp_frames<DF, D, F>(
     let header = pcap::GlobalHeader::read_from(file)?;
 
     // keep a map of ConnectionId => Connection
-    let mut conn_map: HashMap<ConnectionId, DecodedConnection<D>> = HashMap::new();
+    let mut connections = HashMap::new();
 
     // buffer for packet data ...
     // TODO: use mmap
@@ -106,20 +108,24 @@ fn iterate_decoded_tcp_frames<DF, D, F>(
 
         let packet_header = match header.read_packet_header(file) {
             Ok(hdr) => hdr,
-            Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                // assume we have read through the whole file if we cannot read the next header
+                break
+            },
             Err(e) => return Err(e),
         };
 
         assert!(packet_header.is_full());
-        first_offset = first_offset.or(Some(packet_header.offset));
 
-        let elapsed = packet_header.offset - first_offset.unwrap();
+        first_offset = first_offset.or(Some(packet_header.offset));
 
         packet_header.read_packet_into(file, &mut buf).unwrap();
 
         let frame = header.parse_frame(&buf);
         let (ipheader, next) = parse_ip_header(frame.body()).unwrap();
 
+        // this example assumes that all tcp connections that belong to a connection started in the
+        // capture are decodeable with the codec.
         if ipheader.protocol != IpProto::Tcp {
             continue;
         }
@@ -133,10 +139,10 @@ fn iterate_decoded_tcp_frames<DF, D, F>(
             // this mapping is probably wrong in some cases but haven't figured out a better one.
             // basically store the connection with key = (client_addr, server_addr) but try to find
             // it with (server_addr, client_addr) as well.
-            let mut connection = if conn_map.contains_key(&key.wrapped()) {
-                conn_map.get_mut(&key.wrapped()).unwrap()
-            } else if conn_map.contains_key(&key) {
-                conn_map.get_mut(&key).unwrap()
+            let mut connection = if connections.contains_key(&key.wrapped()) {
+                connections.get_mut(&key.wrapped()).unwrap()
+            } else if connections.contains_key(&key) {
+                connections.get_mut(&key).unwrap()
             } else if let Some(conn) = Connection::start(&ipheader, &tcpheader) {
                 // wrap the created connection with these decoders in ClientServer, ServerClient
                 // directions. note that the connection is created on first SYN so it's not really
@@ -145,7 +151,7 @@ fn iterate_decoded_tcp_frames<DF, D, F>(
 
                 let wrapped = conn.decoded(client_decoder, server_decoder);
 
-                match conn_map.entry(key) {
+                match connections.entry(key) {
                     Entry::Vacant(ve) => Some(ve.insert(wrapped)),
                     _ => panic!("Entry cannot be occupied as we just checked it"),
                 };
@@ -153,7 +159,7 @@ fn iterate_decoded_tcp_frames<DF, D, F>(
                 assert!(next.is_empty(), "connection contains data on first SYN");
                 continue;
             } else {
-                // unknown connection, and packet capture does not contain data for its start
+                // unknown connection, packet capture does not contain data for its start
                 continue;
             };
 
@@ -161,9 +167,10 @@ fn iterate_decoded_tcp_frames<DF, D, F>(
             // kind of packet right now
             connection.advance(&ipheader, &tcpheader, next);
 
+            let elapsed = packet_header.offset - first_offset.unwrap();
+
             loop {
                 // now finally loop through the now decodable frames using the codec
-                // code below assumes there is nothing server initiated
                 match connection.decode().unwrap() {
                     None => break,
                     Some((dir, decoded)) => callback(dir, elapsed, decoded),
@@ -179,10 +186,10 @@ fn iterate_decoded_tcp_frames<DF, D, F>(
         };
 
         if let Some(key) = remove {
-            assert!(conn_map.remove(&key).is_some());
+            assert!(connections.remove(&key).is_some());
         }
     }
 
     // return the possibly remaining connections
-    Ok(conn_map)
+    Ok(connections)
 }
