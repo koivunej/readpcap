@@ -5,6 +5,7 @@ use byteorder::NetworkEndian;
 pub mod connection;
 pub use self::connection::ConnectionId;
 pub use self::connection::Connection;
+pub use self::connection::DecodedConnection;
 pub use self::connection::Direction;
 
 #[derive(Debug)]
