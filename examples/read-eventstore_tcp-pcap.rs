@@ -30,7 +30,7 @@ fn main() {
         process::exit(1);
     }
 
-    let filename = env::args().skip(1).next().unwrap_or_else(|| panic!("INPUT argument required"));
+    let filename = env::args().skip(1).next().expect("INPUT argument required");
     let mut file = fs::File::open(filename).expect("Failed to open INPUT file");
 
     print_operation_durations(&mut file).unwrap();
